@@ -356,12 +356,6 @@ static int daemon_accept(int fd) {
             PLOGE("unable to write exit code");
         }
 
-#ifdef SUPERUSER_EMBEDDED
-        if (mount_storage) {
-            mount_emulated_storage(multiuser_get_user_id(daemon_from_uid));
-        }
-#endif
-
         close(fd);
         LOGD("child exited");
         return code;
@@ -400,11 +394,18 @@ static int daemon_accept(int fd) {
             errfd = ptsfd;
         }
     } else {
-        // TODO: Check system property, if PTYs are disabled,
-        // made infd the CTTY using:
-        // ioctl(infd, TIOCSCTTY, 1);
+        // If a TTY was sent directly, make it the CTTY.
+        if (isatty(infd)) {
+            ioctl(infd, TIOCSCTTY, 1);
+        }
     }
     free(pts_slave);
+
+#ifdef SUPERUSER_EMBEDDED
+    if (mount_storage) {
+        mount_emulated_storage(multiuser_get_user_id(daemon_from_uid));
+    }
+#endif
 
     return run_daemon_child(infd, outfd, errfd, argc, argv);
 }
@@ -528,7 +529,7 @@ static void setup_sighandlers(void) {
     }
 }
 
-int connect_daemon(int argc, char *argv[]) {
+int connect_daemon(int argc, char *argv[], int ppid) {
     int uid = getuid();
     int ptmx;
     char pts_slave[PATH_MAX];
@@ -562,11 +563,13 @@ int connect_daemon(int argc, char *argv[]) {
     // Determine which one of our streams are attached to a TTY
     int atty = 0;
 
-    // TODO: Check a system property and never use PTYs if
-    // the property is set.
-    if (isatty(STDIN_FILENO))  atty |= ATTY_IN;
-    if (isatty(STDOUT_FILENO)) atty |= ATTY_OUT;
-    if (isatty(STDERR_FILENO)) atty |= ATTY_ERR;
+    // Send TTYs directly (instead of proxying with a PTY) if
+    // the SUPERUSER_SEND_TTY environment variable is set.
+    if (getenv("SUPERUSER_SEND_TTY") == NULL) {
+        if (isatty(STDIN_FILENO))  atty |= ATTY_IN;
+        if (isatty(STDOUT_FILENO)) atty |= ATTY_OUT;
+        if (isatty(STDERR_FILENO)) atty |= ATTY_ERR;
+    }
 
     if (atty) {
         // We need a PTY. Get one.
@@ -587,7 +590,7 @@ int connect_daemon(int argc, char *argv[]) {
     // User ID
     write_int(socketfd, uid);
     // Parent PID
-    write_int(socketfd, getppid());
+    write_int(socketfd, ppid);
     write_int(socketfd, mount_storage);
 
     // Send stdin
